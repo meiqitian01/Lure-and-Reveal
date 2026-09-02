@@ -1,0 +1,104 @@
+% --------------------------
+% MPC求解器（min_u max_Δx^a J，文档式MPC1）
+% --------------------------
+function [u_opt] = exposure_mpc(ka, x_I, x_hat_a, T_delta_ned, Kc, x_bar_list, A, B, MPC , n_x, n_u, a_last,a, K_a, xK_a)
+
+
+    %inputs:
+        % ka            攻击发起的peoch
+        % x_I           当前的系统状态 NED坐标
+        % x_hat_a       当前攻击者认为的系统状态。 NED坐标
+        % T_delta_ned   检测器2的ECEF的阈值，转化为NED坐标
+        % Kc            攻击者使用的控制器增益
+        % x_bar_list    预期轨迹
+        % C，D          攻击者使用的系统矩阵
+        % MPC           参数，包括k_exp, N, cost函数权重Q, R, 控制输入限制U
+
+    % 输出：最优控制u_opt、攻击者预测状态x_hat_a_pred
+    % C_n2e 是从NED到ECEF的转换矩阵
+
+    %T_delta_ned %先p再v
+
+    % 2. cost function
+    % Q = diag([10,10,10,5,5,5]); % 状态惩罚权重（位置惩罚>速度）
+    % R = diag([1,1,1]);          % 输入惩罚权重
+    % U = [5;5;5];         % 控制量上界（文档公式19，需设定)
+    u = sdpvar(n_u, MPC.N); % 控制输入
+    x_I_pred_ned = sdpvar(n_x, MPC.N+1); % 防御者预测状态
+    x_hat_a_pred_ned = sdpvar(n_x, MPC.N+1); % 攻击者预测状态
+    delta_x_a_ned = sdpvar(n_x, MPC.N); % 攻击向量Δx^a（6维）
+    eps = zeros(3,15);
+    % 目标函数（min_u max_Δx^a J，文档式MPC1）
+    J = 0;
+    for i = 1:MPC.N
+        J = J + (x_I_pred_ned(:,i)-x_bar_list(:,ka-1+i))'*MPC.Q *(x_I_pred_ned(:,i)- ...
+            x_bar_list(:,i)) + u(:,i)'* MPC.R *u(:,i);
+        eps(:,i) = abs(randn(3,1)* 1e-3);
+       
+    end
+
+    % 约束构建
+    constraints = [];
+    % 初始状态约束
+    constraints = constraints+(x_I_pred_ned(:,1) == x_I);
+    constraints = constraints + (x_hat_a_pred_ned(:,1) == x_hat_a);
+
+    % 防御者状态更新（文档式18）
+    for i = 1:MPC.N
+
+        %防御者状态更新
+        constraints = constraints+  (x_I_pred_ned(:,i+1) == A*x_I_pred_ned(:,i) + B*u(:,i));
+
+        % 攻击者状态更新+隐身约束（公式21、22，文档）
+        %attacker计算的下一时刻位置 (暂时用PD)
+        %attack控制器更新
+        y_a = x_hat_a_pred_ned(:,i) - x_bar_list(:,ka-1+i);
+        u_a = K_a.C * xK_a + K_a.D * y_a;
+        xK_a = K_a.A * xK_a + K_a.B * y_a;
+        
+        %attacker状态更新
+        constraints = constraints +( x_hat_a_pred_ned(:,i+1) == A*x_hat_a_pred_ned(:,i) + B*(u_a) + delta_x_a_ned(:,i)); % 文档式16
+
+        for r = 1:n_x
+            % 公式21：逐元素绝对值约束 |Δx^a(r,i)| ≤ T(r)
+            constraints =constraints + (abs(delta_x_a_ned(r,i)) <=abs(T_delta_ned(r)));
+            %不变化太大
+            if i==1
+                constraints =constraints + (abs(x_I_pred_ned(r,1)-x_I(r)) <= 5);
+            % else
+            %     constraints =constraints + (abs(x_I_pred_ned(r,i)-x_I_pred_ned(r,i-1)) <= 2);
+            end
+
+        end
+
+        constraints =constraints + (norm(u(:,1)-a) <=MPC.u_bar-eps(1));
+        % for r = 1:n_u
+        %     constraints =constraints + (abs(u(r,1)-a(r))+eps(r,3) <=MPC.U(r));
+        %     % if r==1
+        %     %     constraints =constraints  + (abs(u(r,i) -  a_last(r)) <= MPC.U_change(r));   %变化范围。  %MPC.U_change = [1;1;1];
+        %     % else
+        %     %     constraints =constraints  + (abs(u(r,i) -  u(r-1,i)) <= MPC.U_change(r));
+        %     % end
+        % end
+    end
+
+
+    %暴露约束（文档式19）
+    d_x= max(abs(x_I_pred_ned(2,MPC.k_exp) - x_hat_a_pred_ned(2,MPC.k_exp)) - 2*T_delta_ned);
+    constraints =constraints+ (d_x >= 0);
+
+    % 求解鲁棒优化
+    ops = sdpsettings('solver','gurobi','verbose',1);  %mosek
+    result = optimize(constraints, J, ops);
+    if result.problem == 0
+        disp('求解成功')
+    else 
+        disp('求解失败，失败原因为：')
+        disp(result.info)
+    end
+
+    u_opt = value(u(:,1));
+    disp("u_opt");
+    disp(u_opt);
+
+end
