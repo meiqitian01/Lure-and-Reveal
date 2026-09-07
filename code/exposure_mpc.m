@@ -88,7 +88,8 @@ function [u_opt] = exposure_mpc(ka, x_I, x_hat_a, T_delta_ned, Kc, x_bar_list, A
     constraints =constraints+ (d_x >= 0);
 
     % 求解鲁棒优化
-    ops = sdpsettings('solver','gurobi','verbose',1);  %mosek
+    %ops = sdpsettings('solver','gurobi','verbose',1);  %mosek
+    ops = sdpsettings('solver','mosek','verbose',1);
     result = optimize(constraints, J, ops);
     if result.problem == 0
         disp('求解成功')
